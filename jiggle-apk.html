@@ -1,0 +1,129 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Jiggle Animator</title><meta name="theme-color" content="#1a1a22">
+<style>
+html,body{margin:0;height:100%;background:#1a1a22;color:#eee;font:14px system-ui,sans-serif;overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
+#ui{position:fixed;left:0;right:0;bottom:0;padding:8px 8px calc(8px + env(safe-area-inset-bottom));background:#000b;max-height:55vh;overflow:auto}
+button,select,input[type=text]{background:#333;color:#fff;border:1px solid #555;border-radius:8px;padding:8px 10px;font-size:14px}
+.row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;align-items:center}
+label{display:flex;align-items:center;gap:6px;width:100%}label input[type=range]{flex:1}
+label span{width:84px}#msg{font-size:12px;color:#9cf;white-space:pre-wrap}
+.on{background:#7a2bd6}
+.f{position:relative;overflow:hidden;display:inline-block;background:#333;border:1px solid #555;border-radius:8px;padding:8px 10px;width:auto}
+.f input{position:absolute;inset:0;opacity:0;width:100%;height:100%}
+</style>
+<script type="importmap">{"imports":{"three":"./lib/three.module.js","three/addons/":"./lib/jsm/"}}</script>
+</head><body>
+<canvas id="c"></canvas>
+<div id="ui">
+<div class="row">
+<label class="f">📂 Model<input type="file" id="m"></label><label class="f">🎞 Anim file<input type="file" id="a"></label>
+<select id="clips"><option value="-1">No clip</option></select>
+<button id="walk">🚶 Walk</button><button id="kick">💥 Shake</button><button id="bones">🦴 Bones</button>
+</div>
+<details open><summary>Jiggle</summary>
+<div class="row"><input type="text" id="kw" value="breast,boob,bust,butt,glute,booty" style="flex:1"><button id="apply">Apply</button></div>
+<label><span>Stiffness</span><input type="range" id="stiff" min="40" max="800" value="260"></label>
+<label><span>Damping</span><input type="range" id="damp" min="1" max="20" value="6"></label>
+<label><span>Strength</span><input type="range" id="gain" min="0" max="4" step="0.1" value="1.5"></label>
+<label><span>Walk speed</span><input type="range" id="spd" min="2" max="8" step="0.1" value="4.5"></label>
+</details>
+<div id="msg">Starting 3D engine… (needs internet). If this text never changes, the engine failed to load.</div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {FBXLoader} from 'three/addons/loaders/FBXLoader.js';
+const $=id=>document.getElementById(id), msg=t=>$('msg').textContent=t;
+addEventListener('error',e=>msg('Error: '+e.message));
+msg('Ready. Tap 📂 Model and choose a .fbx or .glb file.');
+
+const r=new THREE.WebGLRenderer({antialias:true,canvas:$('c')});r.setPixelRatio(Math.min(devicePixelRatio,2));
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x1a1a22);
+const cam=new THREE.PerspectiveCamera(45,1,0.05,100);cam.position.set(0,1.2,3.5);
+scene.add(new THREE.HemisphereLight(0xffffff,0x444455,1.8));
+const dl=new THREE.DirectionalLight(0xffffff,2);dl.position.set(3,6,4);scene.add(dl);
+scene.add(new THREE.GridHelper(10,20,0x555566,0x333344));
+const ctl=new OrbitControls(cam,r.domElement);ctl.enableDamping=true;ctl.target.set(0,0.9,0);
+const rs=()=>{r.setSize(innerWidth,innerHeight,false);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()};
+addEventListener('resize',rs);rs();
+
+let model,mixer,action,clipsList=[],jig=[],legs=[],hips=null,walkOn=false,H=1.7,t=0;
+const T=new THREE.Vector3(),O=new THREE.Vector3(),M3=new THREE.Matrix3(),X=new THREE.Vector3(1,0,0),q=new THREE.Quaternion();
+
+function read(f,isAnim){
+  const ext=f.name.split('.').pop().toLowerCase(),fr=new FileReader();
+  fr.onload=()=>{try{
+    if(ext==='fbx'){const o=new FBXLoader().parse(fr.result,'');done(o,o.animations,isAnim,f.name)}
+    else new GLTFLoader().parse(fr.result,'',g=>done(g.scene,g.animations,isAnim,f.name),e=>msg('Error: '+e.message));
+  }catch(e){msg('Error: '+e.message)}};
+  fr.readAsArrayBuffer(f);
+}
+function done(obj,anims,isAnim,name){
+  if(isAnim){if(!model)return msg('Load a model first.');addClips(anims);msg('Added '+anims.length+' clip(s) from '+name);return}
+  if(model)scene.remove(model);
+  model=obj;scene.add(model);
+  let b=new THREE.Box3().setFromObject(model),s=b.getSize(new THREE.Vector3());
+  if(s.y>0)model.scale.multiplyScalar(H/s.y);
+  model.updateMatrixWorld(true);b=new THREE.Box3().setFromObject(model);
+  const c=b.getCenter(new THREE.Vector3());model.position.set(-c.x,-b.min.y,-c.z);
+  mixer=new THREE.AnimationMixer(model);action=null;clipsList=[];$('clips').innerHTML='<option value="-1">No clip</option>';
+  model.traverse(o=>{if(o.isBone){o.userData.rp=o.position.clone();o.userData.rq=o.quaternion.clone()}});
+  setupWalk();addClips(anims);setupJiggle();
+  ctl.target.set(0,0.9,0);
+}
+function addClips(anims){anims.forEach(cl=>{clipsList.push(cl);const o=document.createElement('option');o.value=clipsList.length-1;o.textContent=cl.name||('clip '+clipsList.length);$('clips').appendChild(o)});
+  if(anims.length&&!action){$('clips').value=clipsList.length-anims.length;play(+$('clips').value)}}
+function play(i){if(action){action.fadeOut(.2);action=null}if(i<0)return;action=mixer.clipAction(clipsList[i]).reset().fadeIn(.2).play()}
+$('clips').onchange=e=>play(+e.target.value);
+
+function bonesAll(){const a=[];model&&model.traverse(o=>o.isBone&&a.push(o));return a}
+function setupJiggle(){
+  jig=[];const ks=$('kw').value.toLowerCase().split(',').map(s=>s.trim()).filter(Boolean);
+  bonesAll().forEach(b=>{const n=b.name.toLowerCase();if(ks.some(k=>n.includes(k)))jig.push({b,p:new THREE.Vector3(),v:new THREE.Vector3(),init:false})});
+  msg(jig.length?'Jiggle bones ('+jig.length+'): '+jig.map(j=>j.b.name).join(', '):'No bones matched. Tap 🦴 Bones to see names, then type part of the name.');
+}
+$('apply').onclick=setupJiggle;
+$('bones').onclick=()=>msg(bonesAll().map(b=>b.name).join(', ')||'No model');
+$('kick').onclick=()=>jig.forEach(j=>j.v.y+=H*(1+Math.random()));
+$('walk').onclick=()=>{walkOn=!walkOn;$('walk').classList.toggle('on',walkOn);if(walkOn){$('clips').value=-1;play(-1)}};
+
+function setupWalk(){
+  legs=[];hips=null;
+  bonesAll().forEach(b=>{const n=b.name.toLowerCase();if(/twist|roll|_ik|ik_|end$/.test(n))return;
+    if(/hips$|pelvis$/.test(n))hips=b;
+    const side=/left|(^|[_.:\-])l([_.:\-]|$)|[_.]l$/.test(n)?1:/right|(^|[_.:\-])r([_.:\-]|$)|[_.]r$/.test(n)?-1:0;
+    if(!side)return;
+    if(/upleg|thigh|upperleg/.test(n))legs.push({b,side,knee:false});
+    else if(/leg|calf|shin/.test(n)&&!/foot|toe/.test(n))legs.push({b,side,knee:true});});
+}
+function toLocal(bone,w){bone.parent.updateWorldMatrix(true,false);M3.setFromMatrix4(new THREE.Matrix4().copy(bone.parent.matrixWorld).invert());return w.clone().applyMatrix3(M3)}
+function walk(){
+  if(!walkOn||action)return;
+  const sp=+$('spd').value;
+  legs.forEach(l=>{const ph=t*sp+(l.side>0?0:Math.PI);
+    const ang=l.knee?Math.max(0,-Math.cos(ph))*0.9:Math.sin(ph)*0.55;
+    l.b.quaternion.copy(l.b.userData.rq).multiply(q.setFromAxisAngle(X,ang))});
+  if(hips){const bob=Math.cos(t*sp*2)*0.015*H;hips.position.copy(hips.userData.rp).add(toLocal(hips,new THREE.Vector3(0,bob,0)));
+    hips.quaternion.copy(hips.userData.rq).multiply(q.setFromAxisAngle(new THREE.Vector3(0,1,0),Math.sin(t*sp)*0.12))}
+}
+function resetBones(){bonesAll().forEach(b=>{if(walkOn&&!action){b.position.copy(b.userData.rp);b.quaternion.copy(b.userData.rq)}});jig.forEach(j=>j.b.position.copy(j.b.userData.rp))}
+function jiggle(dt){
+  const k=+$('stiff').value,d=+$('damp').value,g=+$('gain').value,mx=H*0.06*g,sub=2,h=dt/sub;
+  jig.forEach(j=>{j.b.getWorldPosition(T);if(!j.init){j.p.copy(T);j.init=true}
+    for(let i=0;i<sub;i++){O.copy(T).sub(j.p);j.v.addScaledVector(O,k*h);j.v.multiplyScalar(Math.exp(-d*h));j.p.addScaledVector(j.v,h)}
+    O.copy(j.p).sub(T).multiplyScalar(g);if(O.length()>mx)O.setLength(mx);
+    j.b.position.add(toLocal(j.b,O));j.b.updateMatrixWorld(true)});
+}
+let last=performance.now();
+r.setAnimationLoop(()=>{
+  const now=performance.now(),dt=Math.min((now-last)/1000,1/30);last=now;t+=dt;
+  if(model){resetBones();mixer.update(dt);walk();model.updateMatrixWorld(true);jiggle(dt)}
+  ctl.update();r.render(scene,cam);
+});
+$('m').onchange=e=>e.target.files[0]&&read(e.target.files[0],false);
+$('a').onchange=e=>e.target.files[0]&&read(e.target.files[0],true);
+</script></body></html>
